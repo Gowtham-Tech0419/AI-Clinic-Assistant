@@ -9,7 +9,7 @@ class SlotResponse(BaseModel):
     is_booked: bool
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class AppointmentCreate(BaseModel):
@@ -32,4 +32,4 @@ class AppointmentResponse(BaseModel):
     doctor_name: Optional[str] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
