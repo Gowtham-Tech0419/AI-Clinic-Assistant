@@ -14,38 +14,29 @@ class AppointmentNotFoundError(Exception):
     pass
 
 
-def book_appointment(db: Session, patient_id: int, doctor_id: int, slot_time):
-    doctor = db.query(Doctor).filter(Doctor.id == doctor_id).first()
-    if doctor is None:
-        raise DoctorNotFoundError(f"No doctor with id {doctor_id}")
-
-    slot = db.query(Availability).filter(
-        Availability.doctor_id == doctor_id,
-        Availability.slot_time == slot_time,
-        Availability.is_booked == False
-    ).first()
-
-    if slot is None:
-        raise SlotNotAvailableError(
-            f"Doctor {doctor.name} is not available at {slot_time}"
-        )
-
-    try:
-        appointment = Appointment(
-            patient_id=patient_id,
-            doctor_id=doctor_id,
-            appointment_time=slot_time,
-            status="booked"
-        )
-        db.add(appointment)
-        slot.is_booked = True
-        db.commit()
-        db.refresh(appointment)
-        return appointment
-    except Exception:
-        db.rollback()
-        raise
-
+def book_appointment_by_slot_id(db: Session, patient_id: int, slot_id: int) -> Appointment:
+    # Get the slot and lock it
+    slot = db.query(Availability).filter(Availability.id == slot_id).first()
+    if not slot:
+        raise ValueError("Slot not found")
+    if slot.is_booked:
+        raise ValueError("Slot is already booked")
+    
+    # Mark as booked and create appointment
+    slot.is_booked = True
+    db.add(slot)
+    db.flush()
+    
+    appointment = Appointment(
+        patient_id=patient_id,
+        doctor_id=slot.doctor_id,
+        appointment_time=slot.slot_time,
+        status="booked"
+    )
+    db.add(appointment)
+    db.commit()
+    db.refresh(appointment)
+    return appointment
 
 def cancel_appointment(db: Session, appointment_id: int):
     appointment = db.query(Appointment).filter(Appointment.id == appointment_id).first()
@@ -73,15 +64,26 @@ def reschedule_appointment(db: Session, appointment_id: int, new_slot_time):
     if appointment is None:
         raise AppointmentNotFoundError(f"No appointment with id {appointment_id}")
 
+    # Find or create the new slot
     new_slot = db.query(Availability).filter(
         Availability.doctor_id == appointment.doctor_id,
-        Availability.slot_time == new_slot_time,
-        Availability.is_booked == False
+        Availability.slot_time == new_slot_time
     ).first()
+    
     if new_slot is None:
-        raise SlotNotAvailableError("The requested new slot is not available")
+        new_slot = Availability(
+            doctor_id=appointment.doctor_id,
+            slot_time=new_slot_time,
+            is_booked=False
+        )
+        db.add(new_slot)
+        db.flush()
+
+    if new_slot.is_booked:
+        raise SlotNotAvailableError("The requested new slot is already booked")
 
     try:
+        # Free old slot
         old_slot = db.query(Availability).filter(
             Availability.doctor_id == appointment.doctor_id,
             Availability.slot_time == appointment.appointment_time
@@ -89,6 +91,7 @@ def reschedule_appointment(db: Session, appointment_id: int, new_slot_time):
         if old_slot is not None:
             old_slot.is_booked = False
 
+        # Book new slot
         new_slot.is_booked = True
         appointment.appointment_time = new_slot_time
 

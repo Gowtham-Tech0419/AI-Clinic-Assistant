@@ -3,14 +3,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Optional
 import re
 from app.database import SessionLocal
 from app import schemas, models
 from app.database import get_db
 from app.booking import (
-    book_appointment,
+    book_appointment_by_slot_id,
     cancel_appointment,
     reschedule_appointment,
     SlotNotAvailableError,
@@ -19,7 +19,7 @@ from app.booking import (
 )
 from app.availability import get_available_slots
 from app.llm import interpret_message
-
+from app.models import Availability, Doctor, Patient, Appointment, Department
 app = FastAPI(title="AI Clinic Assistant API", version="1.0")
 
 # Serve static files (CSS, JS, etc.)
@@ -222,22 +222,113 @@ def handle_reschedule(message):
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    message = request.message.strip()
-    if not message:
+    user_message = request.message.strip()
+    if not user_message:
         return {"reply": "Please say something."}
-    msg_lower = message.lower()
-    if "doctors" in msg_lower and "show" in msg_lower:
-        reply = handle_show_doctors()
-    elif "slots" in msg_lower:
-        reply = handle_slots(message)
-    elif "book" in msg_lower:
-        reply = handle_book(message)
-    elif "cancel" in msg_lower:
-        reply = handle_cancel(message)
-    elif "reschedule" in msg_lower:
-        reply = handle_reschedule(message)
-    else:
-        reply = ("I didn't understand. Try: 'show doctors', 'slots for doctor 1 on 2026-08-09', "
-                 "'book with doctor 1 at 2026-08-09 10:00:00', 'cancel appointment 5', "
-                 "'reschedule appointment 5 to 2026-08-09 11:00:00'.")
-    return {"reply": reply}
+
+    # Get structured interpretation from Gemini
+    interpretation = interpret_message(user_message)
+
+    action = interpretation.get("action")
+    params = interpretation.get("parameters", {})
+    reply = interpretation.get("reply", "")
+
+    # If action is unknown, just return the LLM's reply
+    if action == "unknown":
+        return {"reply": reply}
+
+    # Execute the action
+    try:
+        if action == "show_doctors":
+            result = handle_show_doctors()
+            # Combine LLM's initial reply with the actual data
+            final_reply = f"{reply}\n\n{result}" if result else reply
+
+        elif action == "show_slots":
+            doctor_id = params.get("doctor_id")
+            date_str = params.get("date")
+            if not doctor_id or not date_str:
+                return {"reply": "Missing doctor ID or date. Please provide both."}
+            # Validate date
+            try:
+                target_date = date.fromisoformat(date_str)
+            except ValueError:
+                return {"reply": "Invalid date format. Use YYYY-MM-DD."}
+            # Get slots
+            db = SessionLocal()
+            try:
+                slots = get_available_slots(db, doctor_id, target_date)
+                if not slots:
+                    slot_list = "No available slots."
+                else:
+                    slot_list = "\n".join([f"  - {slot.slot_time}" for slot in slots])
+                final_reply = f"{reply}\n\n{slot_list}"
+            finally:
+                db.close()
+
+        elif action == "book":
+            doctor_id = params.get("doctor_id")
+            slot_time_str = params.get("slot_time")
+            if not doctor_id or not slot_time_str:
+                return {"reply": "Missing doctor ID or slot time. Please provide both."}
+            try:
+                slot_time = datetime.fromisoformat(slot_time_str)
+            except ValueError:
+                return {"reply": "Invalid time format. Use YYYY-MM-DD HH:MM:SS."}
+            patient_id = 1  # hardcoded for now
+            db = SessionLocal()
+            try:
+                # Look up the slot by doctor and time
+                slot = db.query(Availability).filter(
+                    Availability.doctor_id == doctor_id,
+                    Availability.slot_time >= slot_time - timedelta(seconds=1),
+                    Availability.slot_time <= slot_time + timedelta(seconds=1),
+                    Availability.is_booked == False
+                ).first()
+                if not slot:
+                    return {"reply": "No available slot found at that time. Please check the time and try again."}
+                # Book using the slot ID
+                appointment = book_appointment_by_slot_id(db, patient_id, slot.id)
+                final_reply = f"{reply}\n\n✅ Appointment booked! ID: {appointment.id}, Time: {appointment.appointment_time}"
+            except Exception as e:
+                final_reply = f"❌ Booking failed: {str(e)}"
+            finally:
+                db.close()
+        elif action == "cancel":
+            appt_id = params.get("appointment_id")
+            if not appt_id:
+                return {"reply": "Missing appointment ID."}
+            db = SessionLocal()
+            try:
+                appointment = cancel_appointment(db, appt_id)
+                final_reply = f"{reply}\n\n✅ Appointment ID {appointment.id} cancelled."
+            except Exception as e:
+                final_reply = f"❌ Cancellation failed: {str(e)}"
+            finally:
+                db.close()
+
+        elif action == "reschedule":
+            appt_id = params.get("appointment_id")
+            new_time_str = params.get("new_slot_time")
+            if not appt_id or not new_time_str:
+                return {"reply": "Missing appointment ID or new slot time."}
+            try:
+                new_time = datetime.fromisoformat(new_time_str)
+            except ValueError:
+                return {"reply": "Invalid time format. Use YYYY-MM-DD HH:MM:SS."}
+            db = SessionLocal()
+            try:
+                appointment = reschedule_appointment(db, appt_id, new_time)
+                final_reply = f"{reply}\n\n✅ Appointment rescheduled to {appointment.appointment_time}"
+            except Exception as e:
+                final_reply = f"❌ Reschedule failed: {str(e)}"
+            finally:
+                db.close()
+
+        else:
+            final_reply = "I'm not sure how to handle that. Please try again."
+
+    except Exception as e:
+        final_reply = f"An error occurred: {str(e)}"
+
+    return {"reply": final_reply}
