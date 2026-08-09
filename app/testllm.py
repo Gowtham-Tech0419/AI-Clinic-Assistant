@@ -10,3 +10,10 @@ print(response.text)
 # for m in genai.list_models():
 #     if 'generateContent' in m.supported_generation_methods:
 #         print(m.name)
+
+# import google.generativeai as genai
+# api_key = "AQ.Ab8RN6IKHO4pNuFxW9--4pXM-3JSLmTLrpC2IJufPhIrF4wm0g"
+# genai.configure(api_key=api_key)
+# for m in genai.list_models():
+#     if 'generateContent' in m.supported_generation_methods:
+#         print(m.name)
