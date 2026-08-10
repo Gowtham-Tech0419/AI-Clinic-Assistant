@@ -29,8 +29,13 @@ async function sendMessage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message })
         });
+        // In the sendMessage function, after getting the response:
         const data = await response.json();
-        addMessage(data.reply, 'bot');
+        const reply = data.reply || "I'm sorry, I didn't understand that.";
+
+        // Ensure reply is a string
+        const replyText = typeof reply === 'string' ? reply : JSON.stringify(reply);
+        addMessage(replyText, 'bot');
     } catch (error) {
         addMessage('⚠️ Error connecting to server.', 'bot');
     } finally {

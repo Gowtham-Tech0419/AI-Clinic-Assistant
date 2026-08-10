@@ -18,7 +18,8 @@ from app.booking import (
     AppointmentNotFoundError
 )
 from app.availability import get_available_slots
-from app.llm import interpret_message
+from app.llm import interpret_message, llm
+from app.embeddings import query_documents
 from app.models import Availability, Doctor, Patient, Appointment, Department
 app = FastAPI(title="AI Clinic Assistant API", version="1.0")
 
@@ -220,28 +221,89 @@ def handle_reschedule(message):
     finally:
         db.close()
 
+def ensure_string(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        texts = []
+        for item in value:
+            if isinstance(item, dict) and item.get('type') == 'text':
+                texts.append(item.get('text', ''))
+            elif isinstance(item, str):
+                texts.append(item)
+        return "\n".join(texts) if texts else "I didn't understand that."
+    return str(value)
+
+def extract_text_from_response(response):
+    if hasattr(response, 'content'):
+        content = response.content
+        if isinstance(content, list):
+            texts = []
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'text':
+                    texts.append(part.get('text', ''))
+                elif isinstance(part, str):
+                    texts.append(part)
+            return "\n".join(texts) if texts else "I couldn't generate a proper response."
+        elif isinstance(content, str):
+            return content
+        else:
+            return str(content)
+    return str(response)
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
     user_message = request.message.strip()
     if not user_message:
         return {"reply": "Please say something."}
 
-    # Get structured interpretation from Gemini
+    # 1. Get structured interpretation from LLM
     interpretation = interpret_message(user_message)
-
     action = interpretation.get("action")
     params = interpretation.get("parameters", {})
-    reply = interpretation.get("reply", "")
+    reply = ensure_string(interpretation.get("reply", ""))
 
-    # If action is unknown, just return the LLM's reply
+    # 2. If the action is unknown, try RAG (retrieve + generate)
     if action == "unknown":
-        return {"reply": reply}
+        try:
+            # Retrieve relevant document chunks
+            chunks = query_documents(user_message, top_k=3)
+            if chunks:
+                # Build context string
+                context = "\n\n".join([
+                    f"[Source: {chunk['metadata'].get('source', 'unknown')}]\n{chunk['text']}"
+                    for chunk in chunks
+                ])
+                rag_prompt = f"""You are a helpful clinic assistant. Use the following retrieved documents to answer the user's question.
+If the documents don't contain the answer, politely say you don't know and offer to connect them with a human.
 
-    # Execute the action
+Retrieved documents:
+{context}
+
+User question: {user_message}
+
+Answer:"""
+                try:
+                    response = llm.invoke(rag_prompt)
+                    final_reply = extract_text_from_response(response)
+                except Exception as e:
+                    print(f"RAG LLM error: {e}")
+                    # Fallback to raw chunks as plain text
+                    chunk_texts = [chunk['text'] for chunk in chunks]
+                    final_reply = "I found this information in our clinic documents:\n\n" + "\n\n".join(chunk_texts)
+            else:
+                # No chunks found, use LLM's fallback reply
+                final_reply = reply
+        except Exception as e:
+            print(f"RAG error: {e}")
+            final_reply = reply
+
+        return {"reply": ensure_string(final_reply)}
+
+    # 3. Handle structured actions
     try:
         if action == "show_doctors":
             result = handle_show_doctors()
-            # Combine LLM's initial reply with the actual data
             final_reply = f"{reply}\n\n{result}" if result else reply
 
         elif action == "show_slots":
@@ -249,12 +311,10 @@ async def chat(request: ChatRequest):
             date_str = params.get("date")
             if not doctor_id or not date_str:
                 return {"reply": "Missing doctor ID or date. Please provide both."}
-            # Validate date
             try:
                 target_date = date.fromisoformat(date_str)
             except ValueError:
                 return {"reply": "Invalid date format. Use YYYY-MM-DD."}
-            # Get slots
             db = SessionLocal()
             try:
                 slots = get_available_slots(db, doctor_id, target_date)
@@ -278,7 +338,7 @@ async def chat(request: ChatRequest):
             patient_id = 1  # hardcoded for now
             db = SessionLocal()
             try:
-                # Look up the slot by doctor and time
+                # Lookup slot with 1‑second tolerance
                 slot = db.query(Availability).filter(
                     Availability.doctor_id == doctor_id,
                     Availability.slot_time >= slot_time - timedelta(seconds=1),
@@ -287,13 +347,13 @@ async def chat(request: ChatRequest):
                 ).first()
                 if not slot:
                     return {"reply": "No available slot found at that time. Please check the time and try again."}
-                # Book using the slot ID
                 appointment = book_appointment_by_slot_id(db, patient_id, slot.id)
                 final_reply = f"{reply}\n\n✅ Appointment booked! ID: {appointment.id}, Time: {appointment.appointment_time}"
             except Exception as e:
                 final_reply = f"❌ Booking failed: {str(e)}"
             finally:
                 db.close()
+
         elif action == "cancel":
             appt_id = params.get("appointment_id")
             if not appt_id:
@@ -331,4 +391,5 @@ async def chat(request: ChatRequest):
     except Exception as e:
         final_reply = f"An error occurred: {str(e)}"
 
-    return {"reply": final_reply}
+    # 4. Final safety check: ensure string
+    return {"reply": ensure_string(final_reply)}

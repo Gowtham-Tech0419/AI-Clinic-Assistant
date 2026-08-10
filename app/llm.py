@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableSequence
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
-api_key = "AQ.Ab8RN6IKHO4pNuFxW9--4pXM-3JSLmTLrpC2IJufPhIrF4wm0g"
+api_key = "Your_Google_API_Key_Here"  # Replace with your actual API key
 # gemini-3.1-flash-lite-preview
 # 1. LLM instance
 llm = ChatGoogleGenerativeAI(
@@ -133,3 +133,5 @@ def interpret_message(user_message: str) -> dict:
 
     # History is automatically stored by RunnableWithMessageHistory
     return result
+# At the end of the file (after interpret_message)
+__all__ = ['interpret_message', 'llm']
