@@ -18,9 +18,12 @@ from app.booking import (
     AppointmentNotFoundError
 )
 from app.availability import get_available_slots
-from app.llm import interpret_message, llm
 from app.embeddings import query_documents
 from app.models import Availability, Doctor, Patient, Appointment, Department
+
+from app.agent import run_agent
+from app.embeddings import query_documents
+from app.llm import llm
 app = FastAPI(title="AI Clinic Assistant API", version="1.0")
 
 # Serve static files (CSS, JS, etc.)
@@ -256,14 +259,41 @@ async def chat(request: ChatRequest):
     user_message = request.message.strip()
     if not user_message:
         return {"reply": "Please say something."}
+    session_id = "default"
+    # 1. Try the agent
+    try:
+        reply = run_agent(user_message, session_id=session_id)
+        # Ensure reply is a string
+        if not isinstance(reply, str):
+            reply = str(reply)
+        # Check if the agent replied with a generic "don't know" message
+        if not reply or any(phrase in reply.lower() for phrase in ["i don't know", "apologize", "not sure", "cannot"]):
+            # Fallback to RAG
+            chunks = query_documents(user_message, top_k=3)
+            if chunks:
+                context = "\n\n".join([f"[Source: {chunk['metadata'].get('source', 'unknown')}]\n{chunk['text']}" for chunk in chunks])
+                rag_prompt = f"""You are a helpful clinic assistant. Use the following retrieved documents to answer the user's question.
+If the documents don't contain the answer, politely say you don't know and offer to connect them with a human.
 
-    # Call interpret_message (which handles tool calls)
-    result = interpret_message(user_message, session_id="default")
-    reply = result.get("reply", "")
+Retrieved documents:
+{context}
 
-    # If the reply is empty or not helpful, try RAG
-    if not reply or "I don't know" in reply or "apologize" in reply:
-        # Try RAG
+User question: {user_message}
+
+Answer:"""
+                try:
+                    response = llm.invoke(rag_prompt)
+                    final_reply = extract_text_from_response(response)
+                except Exception as e:
+                    print(f"RAG LLM error: {e}")
+                    final_reply = "I found this information:\n\n" + "\n\n".join([chunk['text'] for chunk in chunks])
+            else:
+                final_reply = reply
+        else:
+            final_reply = reply
+    except Exception as e:
+        print(f"Agent error: {e}. Falling back to RAG.")
+        # Fallback to RAG directly
         chunks = query_documents(user_message, top_k=3)
         if chunks:
             context = "\n\n".join([f"[Source: {chunk['metadata'].get('source', 'unknown')}]\n{chunk['text']}" for chunk in chunks])
@@ -283,8 +313,6 @@ Answer:"""
                 print(f"RAG LLM error: {e}")
                 final_reply = "I found this information:\n\n" + "\n\n".join([chunk['text'] for chunk in chunks])
         else:
-            final_reply = reply
-    else:
-        final_reply = reply
+            final_reply = "I'm sorry, I couldn't find an answer. Please contact the clinic directly."
 
     return {"reply": ensure_string(final_reply)}

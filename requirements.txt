@@ -10,3 +10,4 @@ chromadb
 sentence-transformers
 pymupdf
 rank_bm25
+langgraph
