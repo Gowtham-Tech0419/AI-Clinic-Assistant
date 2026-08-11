@@ -33,53 +33,141 @@ A production‑ready **AI‑powered clinic assistant** that combines a relationa
 ---
 
 ## 📁 Project Structure
+# 🏥 AI Clinical Assistant
 
+## 📁 Project Structure
 
+```text
 ai_clinical_assistant/
+│
 ├── app/
-│ ├── init.py
-│ ├── agent.py # LangGraph agent with memory
-│ ├── availability.py # Slot availability queries
-│ ├── booking.py # Core booking logic
-│ ├── database.py # SQLAlchemy setup
-│ ├── embeddings.py # ChromaDB & embedding operations
-│ ├── index_docs.py # Document indexing script
-│ ├── llm.py # Gemini LLM instance
-│ ├── main.py # FastAPI app & endpoints
-│ ├── models.py # SQLAlchemy ORM models
-│ ├── schemas.py # Pydantic schemas
-│ ├── seed.py # Database seeding
-│ ├── tools.py # LangChain tool definitions
-│ └── static/ # Frontend assets
-│ ├── index.html
-│ ├── style.css
-│ └── script.js
-├── data/ # Place .txt and .pdf files here
-├── chroma_db/ # Vector DB (auto‑created)
-├── clinic.db # SQLite DB (auto‑created)
+│   ├── __init__.py
+│   ├── agent.py              # LangGraph agent with memory
+│   ├── availability.py       # Slot availability queries
+│   ├── booking.py            # Core booking logic
+│   ├── database.py           # SQLAlchemy setup
+│   ├── embeddings.py         # ChromaDB & embedding operations
+│   ├── index_docs.py         # Document indexing script
+│   ├── llm.py                # Gemini LLM instance
+│   ├── main.py               # FastAPI app & endpoints
+│   ├── models.py             # SQLAlchemy ORM models
+│   ├── schemas.py            # Pydantic schemas
+│   ├── seed.py               # Database seeding
+│   ├── tools.py              # LangChain tool definitions
+│   │
+│   └── static/               # Frontend assets
+│       ├── index.html
+│       ├── style.css
+│       └── script.js
+│
+├── data/                     # Place .txt and .pdf files here
+│
+├── chroma_db/                # Vector DB (auto-created)
+│
+├── clinic.db                 # SQLite DB (auto-created)
+│
 ├── requirements.txt
-├── .env # GEMINI_API_KEY
-├── create_insurance_pdf.py # Helper to generate sample PDF
-├── test_booking.py # Unit test for booking
-├── view_db.py # Inspect database contents
-├── test_retrieval.py # Test RAG retrieval
+│
+├── .env                      # GEMINI_API_KEY
+│
+├── create_insurance_pdf.py   # Helper to generate sample PDF
+├── test_booking.py           # Unit test for booking
+├── view_db.py                # Inspect database contents
+├── test_retrieval.py         # Test RAG retrieval
+│
 └── README.md
+```
+## 🏗️ Architecture Overview
 
+```text
+                    ┌─────────────────┐
+                    │      USER       │
+                    └────────┬────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │     WEB UI      │
+                    └────────┬────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │     FASTAPI     │
+                    │     BACKEND     │
+                    └────────┬────────┘
+                             │
+                  ┌──────────┴──────────┐
+                  │                     │
+                  ▼                     ▼
+          ┌──────────────┐      ┌──────────────┐
+          │  SQL DATABASE│      │   CHROMADB   │
+          │              │      │  VECTOR DB   │
+          │ Appointments │      │              │
+          │ Patients     │      │ RAG Docs     │
+          │ Doctors      │      │ Embeddings   │
+          └──────┬───────┘      └──────┬───────┘
+                 │                     │
+                 └──────────┬──────────┘
+                            ▼
+                  ┌───────────────────┐
+                  │   LANGGRAPH       │
+                  │      AGENT        │
+                  └─────────┬─────────┘
+                            │
+                 ┌──────────┼──────────┐
+                 │          │          │
+                 ▼          ▼          ▼
+              Tools      Memory      RAG
+                 │          │          │
+                 └──────────┼──────────┘
+                            ▼
+                  ┌───────────────────┐
+                  │    GEMINI LLM     │
+                  └─────────┬─────────┘
+                            │
+                            ▼
+                  ┌───────────────────┐
+                  │  FINAL RESPONSE   │
+                  └───────────────────┘
+```
 
----
+### 🚀 Example Interaction
 
-Architecture Overview
+```text
+User:
+"Can I book an appointment with Dr. Kumar tomorrow at 6 PM?"
 
-User (Web UI)  <-->  FastAPI Backend
-                        |
-                  +-----+------+
-                  |            |
-               SQL DB      Vector DB
-               (CRUD)      (ChromaDB)
-                  |            |
-                  +-----+------+
-                        |
-                  LangGraph Agent
-                  (with Tools + Memory)
-                        |
-                   Gemini LLM
+                │
+                ▼
+
+         FastAPI Backend
+                │
+                ▼
+
+        LangGraph Agent
+                │
+        ┌───────┴────────┐
+        ▼                ▼
+ Check Availability   Conversation
+      Tool              Memory
+        │
+        ▼
+    SQL Database
+        │
+        ▼
+   Slot Available
+        │
+        ▼
+   Booking Tool
+        │
+        ▼
+    SQL Database
+        │
+        ▼
+   Gemini LLM
+        │
+        ▼
+"Yes, your appointment has
+ been booked for tomorrow
+ at 6 PM with Dr. Kumar."
+```
+
