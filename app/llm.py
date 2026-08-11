@@ -1,24 +1,35 @@
-import json
-import re
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, HumanMessagePromptTemplate
-from langchain_core.messages import SystemMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnableSequence
-from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
-
-api_key = "Your_API_Key_Here"  # Replace with your actual API key
 # gemini-3.1-flash-lite-preview
-# 1. LLM instance
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from app.tools import (
+    show_doctors,
+    show_available_slots,
+    book_appointment_tool,
+    cancel_appointment_tool,
+    reschedule_appointment_tool
+)
+# ==================== LLM with tools ====================
+# List of tools
+tools = [
+    show_doctors,
+    show_available_slots,
+    book_appointment_tool,
+    cancel_appointment_tool,
+    reschedule_appointment_tool
+]
+api_key = "Your_API_Key_Here"  # Replace with your actual API key
+# Bind tools to the LLM
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite-preview",
     google_api_key=api_key,
     temperature=0.2,
     convert_system_message_to_human=True
-)
+).bind_tools(tools)
 
-# 2. System prompt (static, contains JSON braces)
+# ==================== System prompt ====================
 SYSTEM_PROMPT = """You are a helpful assistant for a clinic. Your role is to help patients book, cancel, or reschedule appointments, and to provide information about doctors and available slots.
 
 CRITICAL RULES:
@@ -28,38 +39,12 @@ CRITICAL RULES:
 - Only recommend a department based on symptoms (e.g., "You may want to see a cardiologist for heart issues").
 - Always be polite and professional.
 
-Your task: Given the user's message and the conversation history, determine which action to take. Respond with a JSON object in the following format:
-{
-  "action": "show_doctors" | "show_slots" | "book" | "cancel" | "reschedule" | "unknown",
-  "parameters": {
-    // For show_slots: { "doctor_id": <int>, "date": "YYYY-MM-DD" }
-    // For book: { "doctor_id": <int>, "slot_time": "YYYY-MM-DD HH:MM:SS" }
-    // For cancel: { "appointment_id": <int> }
-    // For reschedule: { "appointment_id": <int>, "new_slot_time": "YYYY-MM-DD HH:MM:SS" }
-    // For show_doctors: {}
-  },
-  "reply": "A friendly, natural language reply to the user that acknowledges their request and may ask for clarification if needed."
-}
 For questions about insurance, policies, visiting hours, or doctor profiles, ALWAYS use the retrieved documents if available. If the documents don't contain the answer, say you don't know and suggest contacting the front desk.
 
-If the user's message is unclear or missing required information, set action to "unknown" and provide a helpful reply asking for the missing details.
-Only output the JSON object, no other text.
+You have tools available to help users. Use them when appropriate.
 """
 
-# 3. Create prompt with static SystemMessage and history placeholder
-system_msg = SystemMessage(content=SYSTEM_PROMPT)  # No template parsing
-human_msg_template = HumanMessagePromptTemplate.from_template("{input}")
-
-prompt = ChatPromptTemplate.from_messages([
-    system_msg,
-    MessagesPlaceholder(variable_name="history"),
-    human_msg_template
-])
-
-# 4. Base chain (prompt → LLM → string output)
-base_chain = prompt | llm | StrOutputParser()
-
-# 5. In-memory storage for chat histories
+# ==================== Memory / History ====================
 chat_histories = {}
 
 def get_chat_history(session_id: str) -> InMemoryChatMessageHistory:
@@ -67,72 +52,80 @@ def get_chat_history(session_id: str) -> InMemoryChatMessageHistory:
         chat_histories[session_id] = InMemoryChatMessageHistory()
     return chat_histories[session_id]
 
-# 6. Wrap with history management
+# ==================== Conversation wrapper with history ====================
+prompt = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT),
+    MessagesPlaceholder(variable_name="history"),
+    ("human", "{input}")
+])
+
+# Chain: prompt -> LLM (with tools)
+chain = prompt | llm
+
+# Wrap with history
 chain_with_history = RunnableWithMessageHistory(
-    base_chain,
+    chain,
     get_chat_history,
     input_messages_key="input",
     history_messages_key="history"
 )
 
-# ==================== Fallback Parser ====================
-def fallback_parse(user_message: str) -> dict:
-    msg_lower = user_message.lower()
-    if "doctors" in msg_lower and "show" in msg_lower:
-        return {"action": "show_doctors", "parameters": {}, "reply": "Here are our doctors:"}
-    if "slots" in msg_lower:
-        match = re.search(r"doctor\s*(\d+)\s+on\s+(\d{4}-\d{2}-\d{2})", user_message, re.IGNORECASE)
-        if match:
-            return {"action": "show_slots", "parameters": {"doctor_id": int(match.group(1)), "date": match.group(2)}, "reply": f"Showing slots for doctor {match.group(1)} on {match.group(2)}:"}
-        else:
-            return {"action": "unknown", "parameters": {}, "reply": "Please specify doctor ID and date, e.g., 'slots for doctor 1 on 2026-08-09'."}
-    if "book" in msg_lower:
-        match = re.search(r"doctor\s*(\d+)\s+at\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", user_message, re.IGNORECASE)
-        if match:
-            return {"action": "book", "parameters": {"doctor_id": int(match.group(1)), "slot_time": match.group(2)}, "reply": f"Booking with doctor {match.group(1)} at {match.group(2)}..."}
-        else:
-            return {"action": "unknown", "parameters": {}, "reply": "Please specify doctor ID and slot time, e.g., 'book with doctor 1 at 2026-08-09 10:00:00'."}
-    if "cancel" in msg_lower:
-        match = re.search(r"appointment\s*(\d+)", user_message, re.IGNORECASE)
-        if match:
-            return {"action": "cancel", "parameters": {"appointment_id": int(match.group(1))}, "reply": f"Cancelling appointment {match.group(1)}..."}
-        else:
-            return {"action": "unknown", "parameters": {}, "reply": "Please specify appointment ID, e.g., 'cancel appointment 5'."}
-    if "reschedule" in msg_lower:
-        match = re.search(r"appointment\s*(\d+)\s+to\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", user_message, re.IGNORECASE)
-        if match:
-            return {"action": "reschedule", "parameters": {"appointment_id": int(match.group(1)), "new_slot_time": match.group(2)}, "reply": f"Rescheduling appointment {match.group(1)} to {match.group(2)}..."}
-        else:
-            return {"action": "unknown", "parameters": {}, "reply": "Please specify appointment ID and new time, e.g., 'reschedule appointment 5 to 2026-08-09 11:00:00'."}
-    return {"action": "unknown", "parameters": {}, "reply": "I'm not sure what you mean. Try: 'show doctors', 'slots for doctor 1 on 2026-08-09', 'book with doctor 1 at 2026-08-09 10:00:00', 'cancel appointment 5', 'reschedule appointment 5 to 2026-08-09 11:00:00'."}
+# ==================== Main function ====================
+def interpret_message(user_message: str, session_id: str = "default") -> dict:
+    """
+    Process user message, possibly invoking tools, and return a response.
+    Returns a dict with 'reply' (the assistant's final message) and optionally 'tool_calls' (for debugging).
+    """
+    # Invoke chain with history
+    response = chain_with_history.invoke(
+        {"input": user_message},
+        config={"configurable": {"session_id": session_id}}
+    )
 
-# ==================== Main interpretation function ====================
-def interpret_message(user_message: str) -> dict:
-    session_id = "default"  # single user; later can be dynamic
-    try:
-        raw_output = chain_with_history.invoke(
-            {"input": user_message},
-            config={"configurable": {"session_id": session_id}}
-        )
-    except Exception as e:
-        print(f"LLM error: {e}. Falling back to rule-based parser.")
-        return fallback_parse(user_message)
+    # Check if the LLM wants to call any tools
+    tool_calls = response.tool_calls if hasattr(response, 'tool_calls') else []
 
-    raw_text = raw_output.strip()
-    if raw_text.startswith("```json"):
-        raw_text = raw_text[7:]
-    if raw_text.endswith("```"):
-        raw_text = raw_text[:-3]
-    raw_text = raw_text.strip()
+    final_reply = None
 
-    try:
-        result = json.loads(raw_text)
-        if "action" not in result or "reply" not in result:
-            return fallback_parse(user_message)
-    except json.JSONDecodeError:
-        return fallback_parse(user_message)
+    if tool_calls:
+        # We have tool calls – execute them
+        # For simplicity, we'll just call the first tool (most relevant)
+        # In a more advanced agent, you'd loop and handle multiple calls.
+        tool_call = tool_calls[0]
+        tool_name = tool_call['name']
+        tool_args = tool_call['args']
 
-    # History is automatically stored by RunnableWithMessageHistory
-    return result
-# At the end of the file (after interpret_message)
+        # Map tool name to function
+        tool_map = {
+            "show_doctors": show_doctors,
+            "show_available_slots": show_available_slots,
+            "book_appointment_tool": book_appointment_tool,
+            "cancel_appointment_tool": cancel_appointment_tool,
+            "reschedule_appointment_tool": reschedule_appointment_tool,
+        }
+        func = tool_map.get(tool_name)
+        if func:
+            try:
+                result = func.invoke(tool_args)  # tool.invoke expects dict of args
+                # We need to get the string result (tools return strings)
+                # Since our tools are decorated with @tool, they are callable and return string.
+                final_reply = result
+            except Exception as e:
+                final_reply = f"Error executing tool {tool_name}: {str(e)}"
+        else:
+            final_reply = f"Unknown tool: {tool_name}"
+
+        # Also need to add the assistant's response (which includes tool calls) to history?
+        # The wrapper automatically handles adding user and assistant messages.
+        # But we also need to add the tool result as a message? Actually, the wrapper only stores the user and AI messages.
+        # To keep it simple, we return the final reply and let the frontend display it.
+        # For proper multi-turn with tool results, we'd need to manually add a tool result message.
+        # But for a simple demo, we'll just return the tool result.
+    else:
+        # No tool call – just return the assistant's reply
+        final_reply = response.content if hasattr(response, 'content') else str(response)
+
+    return {"reply": final_reply}
+
+# For backward compatibility, also expose llm if needed by main.py
 __all__ = ['interpret_message', 'llm']

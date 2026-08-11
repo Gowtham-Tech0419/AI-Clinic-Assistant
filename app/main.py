@@ -257,24 +257,17 @@ async def chat(request: ChatRequest):
     if not user_message:
         return {"reply": "Please say something."}
 
-    # 1. Get structured interpretation from LLM
-    interpretation = interpret_message(user_message)
-    action = interpretation.get("action")
-    params = interpretation.get("parameters", {})
-    reply = ensure_string(interpretation.get("reply", ""))
+    # Call interpret_message (which handles tool calls)
+    result = interpret_message(user_message, session_id="default")
+    reply = result.get("reply", "")
 
-    # 2. If the action is unknown, try RAG (retrieve + generate)
-    if action == "unknown":
-        try:
-            # Retrieve relevant document chunks
-            chunks = query_documents(user_message, top_k=3)
-            if chunks:
-                # Build context string
-                context = "\n\n".join([
-                    f"[Source: {chunk['metadata'].get('source', 'unknown')}]\n{chunk['text']}"
-                    for chunk in chunks
-                ])
-                rag_prompt = f"""You are a helpful clinic assistant. Use the following retrieved documents to answer the user's question.
+    # If the reply is empty or not helpful, try RAG
+    if not reply or "I don't know" in reply or "apologize" in reply:
+        # Try RAG
+        chunks = query_documents(user_message, top_k=3)
+        if chunks:
+            context = "\n\n".join([f"[Source: {chunk['metadata'].get('source', 'unknown')}]\n{chunk['text']}" for chunk in chunks])
+            rag_prompt = f"""You are a helpful clinic assistant. Use the following retrieved documents to answer the user's question.
 If the documents don't contain the answer, politely say you don't know and offer to connect them with a human.
 
 Retrieved documents:
@@ -283,113 +276,15 @@ Retrieved documents:
 User question: {user_message}
 
 Answer:"""
-                try:
-                    response = llm.invoke(rag_prompt)
-                    final_reply = extract_text_from_response(response)
-                except Exception as e:
-                    print(f"RAG LLM error: {e}")
-                    # Fallback to raw chunks as plain text
-                    chunk_texts = [chunk['text'] for chunk in chunks]
-                    final_reply = "I found this information in our clinic documents:\n\n" + "\n\n".join(chunk_texts)
-            else:
-                # No chunks found, use LLM's fallback reply
-                final_reply = reply
-        except Exception as e:
-            print(f"RAG error: {e}")
-            final_reply = reply
-
-        return {"reply": ensure_string(final_reply)}
-
-    # 3. Handle structured actions
-    try:
-        if action == "show_doctors":
-            result = handle_show_doctors()
-            final_reply = f"{reply}\n\n{result}" if result else reply
-
-        elif action == "show_slots":
-            doctor_id = params.get("doctor_id")
-            date_str = params.get("date")
-            if not doctor_id or not date_str:
-                return {"reply": "Missing doctor ID or date. Please provide both."}
             try:
-                target_date = date.fromisoformat(date_str)
-            except ValueError:
-                return {"reply": "Invalid date format. Use YYYY-MM-DD."}
-            db = SessionLocal()
-            try:
-                slots = get_available_slots(db, doctor_id, target_date)
-                if not slots:
-                    slot_list = "No available slots."
-                else:
-                    slot_list = "\n".join([f"  - {slot.slot_time}" for slot in slots])
-                final_reply = f"{reply}\n\n{slot_list}"
-            finally:
-                db.close()
-
-        elif action == "book":
-            doctor_id = params.get("doctor_id")
-            slot_time_str = params.get("slot_time")
-            if not doctor_id or not slot_time_str:
-                return {"reply": "Missing doctor ID or slot time. Please provide both."}
-            try:
-                slot_time = datetime.fromisoformat(slot_time_str)
-            except ValueError:
-                return {"reply": "Invalid time format. Use YYYY-MM-DD HH:MM:SS."}
-            patient_id = 1  # hardcoded for now
-            db = SessionLocal()
-            try:
-                # Lookup slot with 1‑second tolerance
-                slot = db.query(Availability).filter(
-                    Availability.doctor_id == doctor_id,
-                    Availability.slot_time >= slot_time - timedelta(seconds=1),
-                    Availability.slot_time <= slot_time + timedelta(seconds=1),
-                    Availability.is_booked == False
-                ).first()
-                if not slot:
-                    return {"reply": "No available slot found at that time. Please check the time and try again."}
-                appointment = book_appointment_by_slot_id(db, patient_id, slot.id)
-                final_reply = f"{reply}\n\n✅ Appointment booked! ID: {appointment.id}, Time: {appointment.appointment_time}"
+                response = llm.invoke(rag_prompt)
+                final_reply = extract_text_from_response(response)
             except Exception as e:
-                final_reply = f"❌ Booking failed: {str(e)}"
-            finally:
-                db.close()
-
-        elif action == "cancel":
-            appt_id = params.get("appointment_id")
-            if not appt_id:
-                return {"reply": "Missing appointment ID."}
-            db = SessionLocal()
-            try:
-                appointment = cancel_appointment(db, appt_id)
-                final_reply = f"{reply}\n\n✅ Appointment ID {appointment.id} cancelled."
-            except Exception as e:
-                final_reply = f"❌ Cancellation failed: {str(e)}"
-            finally:
-                db.close()
-
-        elif action == "reschedule":
-            appt_id = params.get("appointment_id")
-            new_time_str = params.get("new_slot_time")
-            if not appt_id or not new_time_str:
-                return {"reply": "Missing appointment ID or new slot time."}
-            try:
-                new_time = datetime.fromisoformat(new_time_str)
-            except ValueError:
-                return {"reply": "Invalid time format. Use YYYY-MM-DD HH:MM:SS."}
-            db = SessionLocal()
-            try:
-                appointment = reschedule_appointment(db, appt_id, new_time)
-                final_reply = f"{reply}\n\n✅ Appointment rescheduled to {appointment.appointment_time}"
-            except Exception as e:
-                final_reply = f"❌ Reschedule failed: {str(e)}"
-            finally:
-                db.close()
-
+                print(f"RAG LLM error: {e}")
+                final_reply = "I found this information:\n\n" + "\n\n".join([chunk['text'] for chunk in chunks])
         else:
-            final_reply = "I'm not sure how to handle that. Please try again."
+            final_reply = reply
+    else:
+        final_reply = reply
 
-    except Exception as e:
-        final_reply = f"An error occurred: {str(e)}"
-
-    # 4. Final safety check: ensure string
     return {"reply": ensure_string(final_reply)}
