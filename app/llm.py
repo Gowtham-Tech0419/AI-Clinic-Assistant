@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableSequence
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
-api_key = "Your_Google_API_Key_Here"  # Replace with your actual API key
+api_key = "Your_API_Key_Here"  # Replace with your actual API key
 # gemini-3.1-flash-lite-preview
 # 1. LLM instance
 llm = ChatGoogleGenerativeAI(
@@ -40,6 +40,7 @@ Your task: Given the user's message and the conversation history, determine whic
   },
   "reply": "A friendly, natural language reply to the user that acknowledges their request and may ask for clarification if needed."
 }
+For questions about insurance, policies, visiting hours, or doctor profiles, ALWAYS use the retrieved documents if available. If the documents don't contain the answer, say you don't know and suggest contacting the front desk.
 
 If the user's message is unclear or missing required information, set action to "unknown" and provide a helpful reply asking for the missing details.
 Only output the JSON object, no other text.
