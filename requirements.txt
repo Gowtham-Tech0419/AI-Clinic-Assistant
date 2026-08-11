@@ -8,3 +8,4 @@ langchain
 langchain-google-genai
 chromadb
 sentence-transformers
+pymupdf
