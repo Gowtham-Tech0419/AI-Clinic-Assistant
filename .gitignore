@@ -1,0 +1,9 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local Vector Database
+chroma_db/
+
+# Sensitive data files (if they shouldn't be public)
+data/*.txt
